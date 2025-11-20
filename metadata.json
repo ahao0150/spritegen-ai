@@ -1,0 +1,5 @@
+{
+  "name": "SpriteGen AI",
+  "description": "Generate 2D game character sprite sheets from a single reference image using Gemini AI. Includes real-time animation preview and export tools.",
+  "requestFramePermissions": []
+}
