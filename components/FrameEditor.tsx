@@ -34,8 +34,6 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
       const totalFrames = rows * cols;
       
       // Only reset frames if the length doesn't match (initial load)
-      // If we just cropped, we want to keep the array structure but maybe reset transforms
-      // For simplicity, we reset transforms on crop because they are baked in.
       setFrames(Array.from({ length: totalFrames }, (_, i) => ({
         id: i,
         rotation: 0,
@@ -55,7 +53,7 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
     ));
   };
 
-  // --- Drag & Drop Logic (Same as before) ---
+  // --- Drag & Drop Logic ---
   const handleDragStart = (e: React.DragEvent, index: number) => {
     setDraggedIndex(index);
     e.dataTransfer.effectAllowed = "move";
@@ -85,7 +83,6 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
     if (!sourceImageRef.current) return;
     setIsProcessing(true);
 
-    // Use timeout to allow UI to show loading state
     setTimeout(() => {
         const img = sourceImageRef.current!;
         const frameW = img.width / cols;
@@ -105,13 +102,12 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
         let minX = frameW, minY = frameH, maxX = 0, maxY = 0;
         let hasContent = false;
 
-        // Helper to detect background color (simple approximation using top-left pixel of first frame)
         // Draw first frame to check background color
         ctx.drawImage(img, 0, 0, frameW, frameH, 0, 0, frameW, frameH);
         const bgPixel = ctx.getImageData(0, 0, 1, 1).data;
-        // Define background as being "close" to the corner pixel
+        
         const isBackground = (r: number, g: number, b: number) => {
-            const threshold = 30;
+            const threshold = 40; // Slightly loose to catch noise
             return Math.abs(r - bgPixel[0]) < threshold &&
                    Math.abs(g - bgPixel[1]) < threshold &&
                    Math.abs(b - bgPixel[2]) < threshold;
@@ -144,8 +140,8 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
             const imageData = ctx.getImageData(0, 0, frameW, frameH);
             const data = imageData.data;
 
-            for (let y = 0; y < frameH; y++) {
-                for (let x = 0; x < frameW; x++) {
+            for (let y = 0; y < frameH; y+=2) { // Optimization: skip every other pixel for speed
+                for (let x = 0; x < frameW; x+=2) {
                     const i = (y * frameW + x) * 4;
                     // Check if NOT background
                     if (!isBackground(data[i], data[i+1], data[i+2])) {
@@ -160,12 +156,11 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
         });
 
         if (!hasContent) {
-            // Fallback if nothing detected (e.g. pure white image)
             minX = 0; minY = 0; maxX = frameW; maxY = frameH;
         }
 
         // Add a little padding
-        const padding = 2;
+        const padding = 4;
         minX = Math.max(0, minX - padding);
         minY = Math.max(0, minY - padding);
         maxX = Math.min(frameW, maxX + padding);
@@ -193,9 +188,8 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
         frames.forEach((frame, outputIndex) => {
              if (frame.isDeleted) return;
 
-             // Re-draw the transformed source frame to temp canvas first
+             // Draw original frame to temp
              ctx.clearRect(0, 0, frameW, frameH);
-             // Fill background on temp canvas to avoid alpha blending issues if rotation leaves gaps
              ctx.fillStyle = `rgb(${bgPixel[0]}, ${bgPixel[1]}, ${bgPixel[2]})`;
              ctx.fillRect(0, 0, frameW, frameH);
 
@@ -214,8 +208,7 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
              );
              ctx.restore();
 
-             // Now copy the CROP region from temp canvas to final canvas
-             // Calculate destination position based on ARRAY ORDER (for reordering support)
+             // Copy CROP region
              const destCol = outputIndex % cols;
              const destRow = Math.floor(outputIndex / cols);
 
@@ -226,9 +219,8 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
              );
         });
 
-        // 3. Update State
         const resultData = finalCanvas.toDataURL('image/png');
-        setCurrentImageSrc(resultData); // Update the editor to show the cropped version
+        setCurrentImageSrc(resultData); 
         setIsProcessing(false);
     }, 100);
   };
@@ -236,15 +228,6 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
   // --- Final Save ---
   const handleSave = () => {
     if (!sourceImageRef.current) return;
-    
-    // If we have done Smart Crop, currentImageSrc is already the baked result.
-    // But we still need to respect the current array order (drag & drop) one last time 
-    // in case user reordered AFTER cropping.
-    
-    // However, since Smart Crop bakes the order into the image, 
-    // and we reset the `frames` transforms after crop, 
-    // we need to handle the case where user Crops -> then Reorders -> then Saves.
-    // The easiest way is to just run the same composition logic as before.
     
     const img = sourceImageRef.current;
     const frameW = img.width / cols;
@@ -302,22 +285,22 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
               <Undo2 size={20} className="text-indigo-400" />
               Refine Sprite Sheet
             </h3>
-            <p className="text-xs text-slate-400">Drag frames to reorder • Crop to subject • Delete invalid</p>
+            <p className="text-xs text-slate-400">Drag to Reorder • Crop to Subject • Delete Invalid</p>
           </div>
           <div className="flex gap-2">
              <button 
                onClick={handleSmartCrop} 
                disabled={isProcessing}
                className="px-4 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white rounded-lg text-sm font-medium flex items-center gap-2 border border-purple-400/30"
-               title="Automatically detect character bounds and resize frames"
+               title="Auto-detect subjects and remove extra whitespace"
              >
               {isProcessing ? <Loader2 size={16} className="animate-spin" /> : <Scissors size={16} />}
-              Smart Crop & Bake
+              Smart Crop
             </button>
             <div className="w-px h-8 bg-slate-700 mx-2"></div>
             <button onClick={onClose} className="px-4 py-2 text-slate-300 hover:text-white text-sm">Cancel</button>
             <button onClick={handleSave} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm font-medium flex items-center gap-2">
-              <Check size={16} /> Save & Close
+              <Check size={16} /> Save Changes
             </button>
           </div>
         </div>
@@ -328,8 +311,8 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
           {isProcessing && (
               <div className="absolute inset-0 z-50 bg-slate-900/80 backdrop-blur flex flex-col items-center justify-center text-white">
                   <Loader2 size={48} className="animate-spin text-purple-500 mb-4" />
-                  <h3 className="text-xl font-bold">Analyzing Pixels...</h3>
-                  <p className="text-slate-400">Calculating optimal bounding box for all frames</p>
+                  <h3 className="text-xl font-bold">Analyzing Frames...</h3>
+                  <p className="text-slate-400">Optimizing frame sizes based on character bounds</p>
               </div>
           )}
 
@@ -449,6 +432,9 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
                             <><Trash2 size={18} /> Clear Frame</>
                         )}
                         </button>
+                        <p className="text-[10px] text-center mt-2 text-slate-500">
+                            Deleted frames are transparent and skipped in playback.
+                        </p>
                     </div>
                  </div>
                </>

@@ -13,14 +13,14 @@ export const Header: React.FC = () => {
             <h1 className="text-xl font-bold bg-gradient-to-r from-white to-slate-400 bg-clip-text text-transparent">
               SpriteGen AI
             </h1>
-            <p className="text-xs text-slate-400 font-mono">Powered by Gemini 2.5</p>
+            <p className="text-xs text-slate-400 font-mono">Studio Suite • Powered by Gemini 2.5</p>
           </div>
         </div>
         <a 
           href="https://ai.google.dev/" 
           target="_blank" 
           rel="noreferrer"
-          className="text-sm text-slate-400 hover:text-white transition-colors"
+          className="text-sm text-slate-400 hover:text-white transition-colors px-4 py-1.5 rounded-full border border-slate-700 hover:bg-slate-800"
         >
           API Docs
         </a>

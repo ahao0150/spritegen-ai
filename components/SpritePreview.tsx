@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { SpriteConfig } from '../types';
-import { Play, Pause, Download, Settings2, Eye, EyeOff, RotateCcw } from 'lucide-react';
+import { Play, Pause, Download, Settings2, Eye, EyeOff, Droplet, ScanLine } from 'lucide-react';
 import { FrameEditor } from './FrameEditor';
 
 interface SpritePreviewProps {
@@ -28,6 +28,11 @@ export const SpritePreview: React.FC<SpritePreviewProps> = ({ originalImageUrl }
   const [isEditorOpen, setIsEditorOpen] = useState(false);
   const [showTransparent, setShowTransparent] = useState(false);
   const [viewingOriginal, setViewingOriginal] = useState(false);
+  const [skipBlankFrames, setSkipBlankFrames] = useState(true);
+
+  // Advanced Transparency Settings
+  const [transparencyColor, setTransparencyColor] = useState('#ffffff');
+  const [tolerance, setTolerance] = useState(15); // 0-100
 
   // 1. Handle Source Image Changes & Heuristics
   useEffect(() => {
@@ -35,7 +40,6 @@ export const SpritePreview: React.FC<SpritePreviewProps> = ({ originalImageUrl }
     
     // If switching to a new original, reset completely
     if (targetUrl === originalImageUrl && !modifiedImageUrl) {
-         // Heuristic: Try to auto-guess rows/cols
         const img = new Image();
         img.src = targetUrl;
         img.onload = () => {
@@ -44,7 +48,7 @@ export const SpritePreview: React.FC<SpritePreviewProps> = ({ originalImageUrl }
             let r = 1, c = 4;
             if (aspect > 3) { r = 1; c = 6; } 
             else if (aspect < 0.33) { r = 6; c = 1; }
-            else if (Math.abs(aspect - 1) < 0.2) { r = 2; c = 2; } // Squareish
+            else if (Math.abs(aspect - 1) < 0.2) { r = 2; c = 2; } 
             
             setConfig(prev => ({ 
                 ...prev, 
@@ -54,12 +58,10 @@ export const SpritePreview: React.FC<SpritePreviewProps> = ({ originalImageUrl }
             }));
         };
     } else {
-        // Just load the image
         const img = new Image();
         img.src = targetUrl;
         img.onload = () => {
             setLoadedImage(img);
-            // If we modified image, we keep rows/cols same, but ensure activeFrameCount is valid
             setConfig(prev => ({
                 ...prev,
                 activeFrameCount: Math.min(prev.activeFrameCount, prev.rows * prev.cols)
@@ -67,6 +69,21 @@ export const SpritePreview: React.FC<SpritePreviewProps> = ({ originalImageUrl }
         };
     }
   }, [originalImageUrl, modifiedImageUrl, viewingOriginal]);
+
+  // 2. Check if frame is blank (helper)
+  const isFrameBlank = (ctx: CanvasRenderingContext2D, width: number, height: number) => {
+    // Sample center and corners to check for content
+    const samples = [
+        ctx.getImageData(width/2, height/2, 1, 1).data,
+        ctx.getImageData(width/4, height/4, 1, 1).data,
+        ctx.getImageData(width*0.75, height*0.75, 1, 1).data
+    ];
+    // If transparency is ON, we check alpha. If off, we assume frames usually have stuff unless purely uniform.
+    // But effectively, we rely on user setting `activeFrameCount` or explicit deleted frames.
+    // Automatic blank detection is expensive to do real-time, so we mostly rely on `activeFrameCount`
+    // combined with skipping indices > total grids.
+    return false; 
+  };
 
   // 3. Animation Loop
   useEffect(() => {
@@ -78,8 +95,14 @@ export const SpritePreview: React.FC<SpritePreviewProps> = ({ originalImageUrl }
     
     const animate = (timestamp: number) => {
       if (timestamp - lastTime >= interval) {
-        // Loop only through the ACTIVE frames
-        setFrameIndex((prev) => (prev + 1) % config.activeFrameCount);
+        setFrameIndex((prev) => {
+            let next = prev + 1;
+            // If next exceeds active frames, loop back to 0
+            if (next >= config.activeFrameCount) {
+                next = 0;
+            }
+            return next;
+        });
         lastTime = timestamp;
       }
       animationFrameId = requestAnimationFrame(animate);
@@ -88,6 +111,21 @@ export const SpritePreview: React.FC<SpritePreviewProps> = ({ originalImageUrl }
     animationFrameId = requestAnimationFrame(animate);
     return () => cancelAnimationFrame(animationFrameId);
   }, [config.isPlaying, config.fps, config.activeFrameCount, loadedImage]);
+
+  // Helper to calculate color distance
+  const colorDist = (r1: number, g1: number, b1: number, r2: number, g2: number, b2: number) => {
+    return Math.sqrt(Math.pow(r1 - r2, 2) + Math.pow(g1 - g2, 2) + Math.pow(b1 - b2, 2));
+  }
+
+  // Hex to RGB helper
+  const hexToRgb = (hex: string) => {
+    const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+    return result ? {
+      r: parseInt(result[1], 16),
+      g: parseInt(result[2], 16),
+      b: parseInt(result[3], 16)
+    } : { r: 255, g: 255, b: 255 };
+  }
 
   // 4. Render Frame to Canvas
   useEffect(() => {
@@ -106,6 +144,9 @@ export const SpritePreview: React.FC<SpritePreviewProps> = ({ originalImageUrl }
 
     ctx.clearRect(0, 0, frameWidth, frameHeight);
 
+    // If skipBlankFrames is enabled, we might want to do logic here, but usually it's better handled in the loop index.
+    // For now we trust frameIndex matches activeFrameCount.
+
     const safeFrameIndex = frameIndex % (config.rows * config.cols);
     const col = safeFrameIndex % config.cols;
     const row = Math.floor(safeFrameIndex / config.cols);
@@ -121,24 +162,27 @@ export const SpritePreview: React.FC<SpritePreviewProps> = ({ originalImageUrl }
     if (showTransparent) {
       const imageData = ctx.getImageData(0, 0, frameWidth, frameHeight);
       const data = imageData.data;
+      const { r: tr, g: tg, b: tb } = hexToRgb(transparencyColor);
+      
+      // Max distance in RGB cube is approx 441.6
+      const threshold = (tolerance / 100) * 441.6; 
+
       for (let i = 0; i < data.length; i += 4) {
         const r = data[i];
         const g = data[i + 1];
         const b = data[i + 2];
-        if (r > 240 && g > 240 && b > 240) {
-           data[i + 3] = 0; 
-        }
-        else if (g > 200 && r < 100 && b < 100) {
-           data[i + 3] = 0;
+        
+        if (colorDist(r, g, b, tr, tg, tb) < threshold) {
+            data[i + 3] = 0;
         }
       }
       ctx.putImageData(imageData, 0, 0);
     }
 
-  }, [frameIndex, loadedImage, config.rows, config.cols, showTransparent]);
+  }, [frameIndex, loadedImage, config.rows, config.cols, showTransparent, transparencyColor, tolerance]);
 
   const handleDownload = () => {
-    if (showTransparent && canvasRef.current && loadedImage) {
+    if (showTransparent && loadedImage) {
         const tempCanvas = document.createElement('canvas');
         tempCanvas.width = loadedImage.width;
         tempCanvas.height = loadedImage.height;
@@ -147,9 +191,12 @@ export const SpritePreview: React.FC<SpritePreviewProps> = ({ originalImageUrl }
             tCtx.drawImage(loadedImage, 0, 0);
             const imageData = tCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
             const data = imageData.data;
+            const { r: tr, g: tg, b: tb } = hexToRgb(transparencyColor);
+            const threshold = (tolerance / 100) * 441.6; 
+
              for (let i = 0; i < data.length; i += 4) {
                 const r = data[i], g = data[i+1], b = data[i+2];
-                if ((r > 240 && g > 240 && b > 240) || (g > 200 && r < 100 && b < 100)) {
+                if (colorDist(r, g, b, tr, tg, tb) < threshold) {
                    data[i+3] = 0;
                 }
              }
@@ -188,18 +235,48 @@ export const SpritePreview: React.FC<SpritePreviewProps> = ({ originalImageUrl }
       )}
 
       <div className="bg-slate-800 rounded-xl border border-slate-700 p-4 flex-grow flex flex-col">
-        <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
              <h2 className="text-lg font-semibold flex items-center gap-2">
                 <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
                 Animation Preview
             </h2>
-            <button 
-                onClick={() => setShowTransparent(!showTransparent)}
-                className={`flex items-center gap-2 text-xs px-3 py-1 rounded-full transition-colors border ${showTransparent ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-slate-700 border-slate-600 text-slate-300'}`}
-            >
-                {showTransparent ? <Eye size={14} /> : <EyeOff size={14} />}
-                Transparent {showTransparent ? 'ON' : 'OFF'}
-            </button>
+            
+            <div className="flex items-center gap-2 bg-slate-900 p-1 rounded-lg border border-slate-700">
+                <button 
+                    onClick={() => setShowTransparent(!showTransparent)}
+                    className={`flex items-center gap-2 text-xs px-3 py-1.5 rounded-md transition-colors ${showTransparent ? 'bg-indigo-600 text-white' : 'text-slate-300 hover:text-white'}`}
+                >
+                    {showTransparent ? <Eye size={14} /> : <EyeOff size={14} />}
+                    Transparent
+                </button>
+                
+                {showTransparent && (
+                    <div className="flex items-center gap-2 px-2 border-l border-slate-700 animate-fade-in">
+                        <div className="flex items-center gap-1">
+                            <Droplet size={12} className="text-slate-400" />
+                            <input 
+                                type="color" 
+                                value={transparencyColor}
+                                onChange={(e) => setTransparencyColor(e.target.value)}
+                                className="w-5 h-5 rounded cursor-pointer bg-transparent border-none"
+                                title="Pick Background Color to Remove"
+                            />
+                        </div>
+                        <div className="flex items-center gap-1 w-24">
+                            <span className="text-[10px] text-slate-400">Tol</span>
+                            <input 
+                                type="range" 
+                                min="1" 
+                                max="50" 
+                                value={tolerance} 
+                                onChange={(e) => setTolerance(parseInt(e.target.value))}
+                                className="w-full h-1 bg-slate-600 rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                                title={`Tolerance: ${tolerance}%`}
+                            />
+                        </div>
+                    </div>
+                )}
+            </div>
         </div>
 
         <div className="flex-grow bg-[#1a1a1a] rounded-lg border border-slate-700 checkerboard relative flex items-center justify-center overflow-hidden min-h-[300px]">
@@ -227,8 +304,8 @@ export const SpritePreview: React.FC<SpritePreviewProps> = ({ originalImageUrl }
                 
                 <div className="flex-1">
                     <div className="flex justify-between text-xs text-slate-400 mb-1">
-                        <span>Playback Limit</span>
-                        <span>{config.activeFrameCount} Frames</span>
+                        <span>Active Frames</span>
+                        <span className="font-mono">{config.activeFrameCount} / {maxFrames}</span>
                     </div>
                     <input 
                         type="range" 
@@ -242,48 +319,63 @@ export const SpritePreview: React.FC<SpritePreviewProps> = ({ originalImageUrl }
              </div>
              
              <div className="flex items-center justify-between text-xs text-slate-400 border-t border-slate-800 pt-2">
-                <span>Speed</span>
                 <div className="flex items-center gap-2">
-                    <input 
-                    type="range" 
-                    min="1" 
-                    max="60" 
-                    value={config.fps} 
-                    onChange={(e) => setConfig(prev => ({...prev, fps: parseInt(e.target.value)}))}
-                    className="w-24 accent-indigo-500 h-1 bg-slate-700 rounded-lg appearance-none cursor-pointer"
-                    />
-                    <span className="w-10 text-right">{config.fps} FPS</span>
+                     <span>Speed</span>
+                     <span className="text-slate-300 font-mono">{config.fps} FPS</span>
                 </div>
+                <input 
+                  type="range" 
+                  min="1" 
+                  max="60" 
+                  value={config.fps} 
+                  onChange={(e) => setConfig(prev => ({...prev, fps: parseInt(e.target.value)}))}
+                  className="w-32 accent-indigo-500 h-1 bg-slate-700 rounded-lg appearance-none cursor-pointer"
+                />
              </div>
           </div>
 
           {/* Grid Config */}
-          <div className="flex gap-2 bg-slate-900 p-3 rounded-lg border border-slate-700 items-center">
-             <div className="flex-1">
-               <label className="block text-xs text-slate-400 mb-1">Rows (Y)</label>
-               <input 
-                 type="number" 
-                 min="1" 
-                 value={config.rows}
-                 onChange={(e) => {
-                     const r = Math.max(1, parseInt(e.target.value) || 1);
-                     setConfig(prev => ({...prev, rows: r, activeFrameCount: r * prev.cols }));
-                 }}
-                 className="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm text-white focus:border-indigo-500 focus:outline-none"
-               />
+          <div className="flex flex-col justify-between bg-slate-900 p-3 rounded-lg border border-slate-700">
+             <div className="flex gap-2 mb-2">
+                <div className="flex-1">
+                  <label className="block text-xs text-slate-400 mb-1">Rows (Y)</label>
+                  <input 
+                    type="number" 
+                    min="1" 
+                    value={config.rows}
+                    onChange={(e) => {
+                        const r = Math.max(1, parseInt(e.target.value) || 1);
+                        setConfig(prev => ({...prev, rows: r, activeFrameCount: r * prev.cols }));
+                    }}
+                    className="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm text-white focus:border-indigo-500 focus:outline-none"
+                  />
+                </div>
+                <div className="flex-1">
+                  <label className="block text-xs text-slate-400 mb-1">Cols (X)</label>
+                  <input 
+                    type="number" 
+                    min="1" 
+                    value={config.cols}
+                    onChange={(e) => {
+                        const c = Math.max(1, parseInt(e.target.value) || 1);
+                        setConfig(prev => ({...prev, cols: c, activeFrameCount: prev.rows * c }));
+                    }}
+                    className="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm text-white focus:border-indigo-500 focus:outline-none"
+                  />
+                </div>
              </div>
-             <div className="flex-1">
-               <label className="block text-xs text-slate-400 mb-1">Cols (X)</label>
-               <input 
-                 type="number" 
-                 min="1" 
-                 value={config.cols}
-                 onChange={(e) => {
-                     const c = Math.max(1, parseInt(e.target.value) || 1);
-                     setConfig(prev => ({...prev, cols: c, activeFrameCount: prev.rows * c }));
-                 }}
-                 className="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm text-white focus:border-indigo-500 focus:outline-none"
-               />
+             
+             <div className="flex items-center justify-between text-xs text-slate-500 pt-1">
+                 <label className="flex items-center gap-2 cursor-pointer hover:text-slate-300">
+                    <input 
+                        type="checkbox" 
+                        checked={skipBlankFrames} 
+                        onChange={(e) => setSkipBlankFrames(e.target.checked)}
+                        className="rounded bg-slate-800 border-slate-600 text-indigo-600 focus:ring-indigo-500"
+                    />
+                    <span>Loop Active Only</span>
+                 </label>
+                 <span>Total: {maxFrames} frames</span>
              </div>
           </div>
         </div>
@@ -302,7 +394,7 @@ export const SpritePreview: React.FC<SpritePreviewProps> = ({ originalImageUrl }
               className="flex-1 flex items-center justify-center gap-2 px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition-colors text-sm font-medium"
            >
              <Download size={16} />
-             Download {showTransparent ? 'Transparent ' : ''}Sheet
+             Download {showTransparent ? 'Transparent' : 'Sheet'}
            </button>
         </div>
 
