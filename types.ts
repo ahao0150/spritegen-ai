@@ -14,6 +14,7 @@ export interface GenerationState {
 
 export enum ModelType {
   GEMINI_FLASH_IMAGE = 'gemini-2.5-flash-image',
+  GEMINI_PRO_IMAGE = 'gemini-3-pro-image-preview',
 }
 
 export type BackgroundOption = 'white' | 'green';

@@ -3,8 +3,8 @@ import { Header } from './components/Header';
 import { SpritePreview } from './components/SpritePreview';
 import { Spinner } from './components/Spinner';
 import { generateSpriteSheet } from './services/geminiService';
-import { Upload, Wand2, AlertCircle, Image as ImageIcon, PaintBucket, Layers, FileUp } from 'lucide-react';
-import { GenerationState, BackgroundOption } from './types';
+import { Upload, Wand2, AlertCircle, Image as ImageIcon, PaintBucket, Layers, FileUp, Cpu } from 'lucide-react';
+import { GenerationState, BackgroundOption, ModelType } from './types';
 
 const App: React.FC = () => {
   // State
@@ -13,6 +13,7 @@ const App: React.FC = () => {
   const [importedSprite, setImportedSprite] = useState<string | null>(null);
   const [prompt, setPrompt] = useState('');
   const [backgroundOpt, setBackgroundOpt] = useState<BackgroundOption>('white');
+  const [selectedModel, setSelectedModel] = useState<ModelType>(ModelType.GEMINI_FLASH_IMAGE);
   const [genState, setGenState] = useState<GenerationState>({
     isLoading: false,
     error: null,
@@ -60,7 +61,7 @@ const App: React.FC = () => {
     setGenState({ isLoading: true, error: null, resultImage: null });
 
     try {
-      const resultBase64 = await generateSpriteSheet(refImage, prompt, backgroundOpt);
+      const resultBase64 = await generateSpriteSheet(refImage, prompt, backgroundOpt, selectedModel);
       setGenState({
         isLoading: false,
         error: null,
@@ -168,36 +169,49 @@ const App: React.FC = () => {
                       />
                     </div>
 
-                    {/* Background Selection */}
-                    <div className="bg-slate-900/50 rounded-lg p-3 border border-slate-700/50">
-                        <label className="block text-xs text-slate-400 mb-2 font-semibold flex items-center gap-1">
-                            <PaintBucket size={12} /> GENERATION BACKGROUND
-                        </label>
-                        <div className="flex gap-3">
-                            <label className="flex items-center gap-2 cursor-pointer">
-                                <input 
-                                    type="radio" 
-                                    name="bgOption" 
-                                    checked={backgroundOpt === 'white'}
-                                    onChange={() => setBackgroundOpt('white')}
-                                    className="text-indigo-600 focus:ring-indigo-500 bg-slate-800 border-slate-600"
-                                />
-                                <span className="text-sm text-white">White</span>
+                    {/* Model & Background Settings */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div className="bg-slate-900/50 rounded-lg p-3 border border-slate-700/50">
+                            <label className="block text-xs text-slate-400 mb-2 font-semibold flex items-center gap-1">
+                                <Cpu size={12} /> MODEL
                             </label>
-                            <label className="flex items-center gap-2 cursor-pointer">
-                                <input 
-                                    type="radio" 
-                                    name="bgOption" 
-                                    checked={backgroundOpt === 'green'}
-                                    onChange={() => setBackgroundOpt('green')}
-                                    className="text-green-500 focus:ring-green-500 bg-slate-800 border-slate-600"
-                                />
-                                <span className="text-sm text-green-400">Green Screen</span>
-                            </label>
+                            <select 
+                                value={selectedModel}
+                                onChange={(e) => setSelectedModel(e.target.value as ModelType)}
+                                className="w-full bg-slate-800 border border-slate-600 rounded px-2 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500"
+                            >
+                                <option value={ModelType.GEMINI_FLASH_IMAGE}>Gemini 2.5 Flash (Fast)</option>
+                                <option value={ModelType.GEMINI_PRO_IMAGE}>Nano Banana (Pro)</option>
+                            </select>
                         </div>
-                        <p className="text-[10px] text-slate-500 mt-2">
-                            * Select Green Screen for easier background removal on complex characters.
-                        </p>
+
+                        <div className="bg-slate-900/50 rounded-lg p-3 border border-slate-700/50">
+                            <label className="block text-xs text-slate-400 mb-2 font-semibold flex items-center gap-1">
+                                <PaintBucket size={12} /> BACKGROUND
+                            </label>
+                            <div className="flex gap-2">
+                                <label className="flex items-center gap-1.5 cursor-pointer">
+                                    <input 
+                                        type="radio" 
+                                        name="bgOption" 
+                                        checked={backgroundOpt === 'white'}
+                                        onChange={() => setBackgroundOpt('white')}
+                                        className="text-indigo-600 bg-slate-800 border-slate-600"
+                                    />
+                                    <span className="text-xs">White</span>
+                                </label>
+                                <label className="flex items-center gap-1.5 cursor-pointer">
+                                    <input 
+                                        type="radio" 
+                                        name="bgOption" 
+                                        checked={backgroundOpt === 'green'}
+                                        onChange={() => setBackgroundOpt('green')}
+                                        className="text-green-500 bg-slate-800 border-slate-600"
+                                    />
+                                    <span className="text-xs text-green-400">Green</span>
+                                </label>
+                            </div>
+                        </div>
                     </div>
 
                     <button 
@@ -213,7 +227,7 @@ const App: React.FC = () => {
                       {genState.isLoading ? (
                         <>
                           <Spinner />
-                          <span>Generating Assets...</span>
+                          <span>Generating with {selectedModel === ModelType.GEMINI_FLASH_IMAGE ? 'Flash' : 'Nano Banana'}...</span>
                         </>
                       ) : (
                         <>

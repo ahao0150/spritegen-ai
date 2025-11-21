@@ -209,15 +209,12 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
         };
 
         // 1. Determine Background Color (sample corners of first visible frame)
-        // We render the first non-deleted frame to temp canvas to sample it
         const firstVisibleFrame = frames.find(f => !f.isDeleted) || frames[0];
         const firstFrameData = renderFrameToTemp(firstVisibleFrame).data;
-        
-        // Sample Top-Left pixel
         const bgPixel = [firstFrameData[0], firstFrameData[1], firstFrameData[2]];
         
         const isBackground = (r: number, g: number, b: number) => {
-            const threshold = 40; // Tolerance
+            const threshold = 40; 
             return Math.abs(r - bgPixel[0]) < threshold &&
                    Math.abs(g - bgPixel[1]) < threshold &&
                    Math.abs(b - bgPixel[2]) < threshold;
@@ -235,7 +232,7 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
                 continue;
             }
             
-            const imageData = renderFrameToTemp(frame); // This draws to ctx
+            const imageData = renderFrameToTemp(frame); 
             const data = imageData.data;
             
             // Find bounds for THIS frame
@@ -293,7 +290,11 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
         finalCtx.fillRect(0, 0, finalCanvas.width, finalCanvas.height);
         
         // 4. Draw frames CENTERED in new slots
+        // REPACKING LOGIC: Use packedIndex to skip holes
+        let packedIndex = 0;
+        
         frames.forEach((frame, i) => {
+            // Skip deleted OR empty frames (removed from flow)
             if (frame.isDeleted || !frameBounds[i].hasContent) return;
             
             const bounds = frameBounds[i];
@@ -301,9 +302,9 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
             // Re-render frame to temp canvas to get the source pixels
             renderFrameToTemp(frame); 
             
-            // Destination in new canvas
-            const destCol = i % cols;
-            const destRow = Math.floor(i / cols);
+            // Destination in new canvas (Sequential Packing)
+            const destCol = packedIndex % cols;
+            const destRow = Math.floor(packedIndex / cols);
             
             // Calculate position to center the content
             const cellX = destCol * maxContentW;
@@ -315,16 +316,26 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
             
             finalCtx.drawImage(
                 tempCanvas,
-                bounds.x, bounds.y, bounds.w, bounds.h, // Source crop (The identified subject)
+                bounds.x, bounds.y, bounds.w, bounds.h, // Source crop
                 destX, destY, bounds.w, bounds.h        // Dest location (Centered)
             );
+            
+            packedIndex++;
         });
         
         // 5. Update State
         const resultData = finalCanvas.toDataURL('image/png');
         
-        // Important: Reset transforms since we baked them in
-        setFrames(prev => prev.map(f => ({ ...f, overrideImage: undefined, rotation: 0, flipH: false, scale: 1 })));
+        // Important: Reset transforms & state since we baked the image.
+        // We also reset deletions because the deleted frames are now GONE from the source image.
+        setFrames(Array.from({ length: rows * cols }, (_, i) => ({
+          id: i,
+          rotation: 0,
+          scale: 1,
+          flipH: false,
+          isDeleted: false, // Reset to fresh state
+        })));
+        
         setCurrentImageSrc(resultData); 
         setIsProcessing(false);
     }, 100);
@@ -353,12 +364,18 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
             overrideImages.set(f.id, i);
         }
     }
+    
+    // Repack Logic on Save
+    let packedIndex = 0;
 
-    frames.forEach((frame, outputIndex) => {
+    frames.forEach((frame) => {
+      // Skip deleted frames so they don't appear in final output
       if (frame.isDeleted) return;
 
-      const destCol = outputIndex % cols;
-      const destRow = Math.floor(outputIndex / cols);
+      // Calculate destination based on PACKED index (0, 1, 2...)
+      // This shifts frames to fill gaps
+      const destCol = packedIndex % cols;
+      const destRow = Math.floor(packedIndex / cols);
       
       const destCenterX = (destCol * frameW) + (frameW / 2);
       const destCenterY = (destRow * frameH) + (frameH / 2);
@@ -386,6 +403,7 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
       }
 
       ctx.restore();
+      packedIndex++;
     });
 
     onSave(canvas.toDataURL('image/png'));
@@ -412,10 +430,10 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
                onClick={handleSmartCrop} 
                disabled={isProcessing}
                className="px-4 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white rounded-lg text-sm font-medium flex items-center gap-2 border border-purple-400/30"
-               title="Isolate subjects and center them in a tighter grid"
+               title="Isolate subjects, remove deleted frames, and center in grid"
              >
               {isProcessing ? <Loader2 size={16} className="animate-spin" /> : <Scissors size={16} />}
-              Trim & Center All
+              Repack & Center
             </button>
             <div className="w-px h-8 bg-slate-700 mx-2"></div>
             <button onClick={onClose} className="px-4 py-2 text-slate-300 hover:text-white text-sm">Cancel</button>
@@ -431,8 +449,8 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
           {isProcessing && (
               <div className="absolute inset-0 z-50 bg-slate-900/80 backdrop-blur flex flex-col items-center justify-center text-white">
                   <Loader2 size={48} className="animate-spin text-purple-500 mb-4" />
-                  <h3 className="text-xl font-bold">Segmenting & Centering...</h3>
-                  <p className="text-slate-400">Isolating characters and removing empty space</p>
+                  <h3 className="text-xl font-bold">Repacking Sprite Sheet...</h3>
+                  <p className="text-slate-400">Removing gaps and centering characters</p>
               </div>
           )}
 
@@ -598,7 +616,7 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
                         )}
                         </button>
                         <p className="text-[10px] text-center mt-2 text-slate-500">
-                            Deleted frames are transparent and skipped in playback.
+                            Deleted frames are removed during download/save.
                         </p>
                     </div>
                  </div>

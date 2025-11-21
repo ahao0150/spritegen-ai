@@ -6,7 +6,8 @@ const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 export const generateSpriteSheet = async (
   referenceImageBase64: string,
   prompt: string,
-  background: BackgroundOption
+  background: BackgroundOption,
+  model: ModelType = ModelType.GEMINI_FLASH_IMAGE
 ): Promise<string> => {
   try {
     // Strip the data:image/png;base64, prefix if present
@@ -33,7 +34,7 @@ export const generateSpriteSheet = async (
     `;
 
     const response = await ai.models.generateContent({
-      model: ModelType.GEMINI_FLASH_IMAGE,
+      model: model,
       contents: {
         parts: [
           {
@@ -97,7 +98,7 @@ export const regenerateSingleFrame = async (
     `;
 
     const response = await ai.models.generateContent({
-      model: ModelType.GEMINI_FLASH_IMAGE,
+      model: ModelType.GEMINI_FLASH_IMAGE, // Keep redraw fast with Flash
       contents: {
         parts: [
           { inlineData: { data: base64Data, mimeType } },
