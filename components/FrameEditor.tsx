@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { RotateCw, Minimize2, Maximize2, FlipHorizontal, Trash2, Check, X, Undo2, GripVertical, ArrowRightLeft, Scissors, Loader2 } from 'lucide-react';
+import { RotateCw, Minimize2, Maximize2, FlipHorizontal, Trash2, Check, X, Undo2, GripVertical, ArrowRightLeft, Scissors, Loader2, Sparkles, RefreshCw } from 'lucide-react';
+import { regenerateSingleFrame } from '../services/geminiService';
 
 interface FrameData {
   id: number;
@@ -7,6 +8,7 @@ interface FrameData {
   scale: number;
   flipH: boolean;
   isDeleted: boolean;
+  overrideImage?: string; // URL/Base64 of the AI regenerated image
 }
 
 interface FrameEditorProps {
@@ -21,11 +23,16 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
   const [frames, setFrames] = useState<FrameData[]>([]);
   const [selectedFrameId, setSelectedFrameId] = useState<number | null>(null); 
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
-  const [isProcessing, setIsProcessing] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false); // For smart crop
   const [currentImageSrc, setCurrentImageSrc] = useState(imageUrl);
   const sourceImageRef = useRef<HTMLImageElement | null>(null);
   
-  // Initialize or Re-initialize when image source changes
+  // AI Redraw State
+  const [redrawPrompt, setRedrawPrompt] = useState('');
+  const [isGeneratingVar, setIsGeneratingVar] = useState(false);
+  const [variations, setVariations] = useState<string[]>([]);
+
+  // Initialize
   useEffect(() => {
     const img = new Image();
     img.src = currentImageSrc;
@@ -33,24 +40,84 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
       sourceImageRef.current = img;
       const totalFrames = rows * cols;
       
-      // Only reset frames if the length doesn't match (initial load)
-      setFrames(Array.from({ length: totalFrames }, (_, i) => ({
-        id: i,
-        rotation: 0,
-        scale: 1,
-        flipH: false,
-        isDeleted: false,
-      })));
+      // Preserve existing frames logic if just refreshing image, 
+      // but usually we reset on new Editor open. 
+      // Here we simple-check length to avoid wiping state on re-renders if strict mode
+      if (frames.length !== totalFrames) {
+        setFrames(Array.from({ length: totalFrames }, (_, i) => ({
+          id: i,
+          rotation: 0,
+          scale: 1,
+          flipH: false,
+          isDeleted: false,
+        })));
+      }
       
       if (selectedFrameId === null) setSelectedFrameId(0);
     };
   }, [currentImageSrc, rows, cols]);
+
+  // Reset variations when changing selection
+  useEffect(() => {
+    setVariations([]);
+    setRedrawPrompt('');
+  }, [selectedFrameId]);
 
   const handleUpdateFrame = (updates: Partial<FrameData>) => {
     if (selectedFrameId === null) return;
     setFrames(prev => prev.map(f => 
       f.id === selectedFrameId ? { ...f, ...updates } : f
     ));
+  };
+
+  // --- AI Redraw Logic ---
+  const generateVariations = async () => {
+    const selectedFrame = frames.find(f => f.id === selectedFrameId);
+    if (!selectedFrame || !sourceImageRef.current || !redrawPrompt.trim()) return;
+
+    setIsGeneratingVar(true);
+    setVariations([]);
+
+    try {
+        // 1. Extract the current frame visuals as base64
+        const img = sourceImageRef.current;
+        const frameW = img.width / cols;
+        const frameH = img.height / rows;
+        
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = frameW;
+        tempCanvas.height = frameH;
+        const ctx = tempCanvas.getContext('2d');
+        
+        if (ctx) {
+            // If it has an override, use that, otherwise crop from source
+            if (selectedFrame.overrideImage) {
+                 const overrideImg = await new Promise<HTMLImageElement>((resolve) => {
+                     const i = new Image();
+                     i.onload = () => resolve(i);
+                     i.src = selectedFrame.overrideImage!;
+                 });
+                 ctx.drawImage(overrideImg, 0, 0, frameW, frameH);
+            } else {
+                 const srcCol = selectedFrame.id % cols;
+                 const srcRow = Math.floor(selectedFrame.id / cols);
+                 ctx.drawImage(img, srcCol * frameW, srcRow * frameH, frameW, frameH, 0, 0, frameW, frameH);
+            }
+            
+            const base64Ref = tempCanvas.toDataURL('image/png');
+
+            // 2. Generate 3 variations in parallel
+            const promises = [1, 2, 3].map(() => regenerateSingleFrame(base64Ref, redrawPrompt));
+            const results = await Promise.all(promises);
+            
+            setVariations(results);
+        }
+    } catch (e) {
+        console.error("Variation generation failed", e);
+        // Maybe show error toast
+    } finally {
+        setIsGeneratingVar(false);
+    }
   };
 
   // --- Drag & Drop Logic ---
@@ -83,7 +150,7 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
     if (!sourceImageRef.current) return;
     setIsProcessing(true);
 
-    setTimeout(() => {
+    setTimeout(async () => {
         const img = sourceImageRef.current!;
         const frameW = img.width / cols;
         const frameH = img.height / rows;
@@ -98,6 +165,16 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
             return;
         }
 
+        // Pre-load all override images
+        const overrideImages = new Map<number, HTMLImageElement>();
+        for (const f of frames) {
+            if (f.overrideImage && !f.isDeleted) {
+                const i = new Image();
+                await new Promise((r) => { i.onload = r; i.src = f.overrideImage!; });
+                overrideImages.set(f.id, i);
+            }
+        }
+
         // 1. Analyze all frames to find the global bounding box
         let minX = frameW, minY = frameH, maxX = 0, maxY = 0;
         let hasContent = false;
@@ -107,7 +184,7 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
         const bgPixel = ctx.getImageData(0, 0, 1, 1).data;
         
         const isBackground = (r: number, g: number, b: number) => {
-            const threshold = 40; // Slightly loose to catch noise
+            const threshold = 40; 
             return Math.abs(r - bgPixel[0]) < threshold &&
                    Math.abs(g - bgPixel[1]) < threshold &&
                    Math.abs(b - bgPixel[2]) < threshold;
@@ -120,30 +197,34 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
             // Clear temp canvas
             ctx.clearRect(0, 0, frameW, frameH);
             
-            // Draw the frame with its CURRENT transforms
-            const srcCol = frame.id % cols;
-            const srcRow = Math.floor(frame.id / cols);
-            
+            // Draw logic
             ctx.save();
             ctx.translate(frameW/2, frameH/2);
             ctx.rotate((frame.rotation * Math.PI) / 180);
             ctx.scale(frame.flipH ? -1 : 1, 1);
             ctx.scale(frame.scale, frame.scale);
-            ctx.drawImage(
-                img, 
-                srcCol * frameW, srcRow * frameH, frameW, frameH, 
-                -frameW/2, -frameH/2, frameW, frameH
-            );
+
+            if (overrideImages.has(frame.id)) {
+                const oImg = overrideImages.get(frame.id)!;
+                ctx.drawImage(oImg, -frameW/2, -frameH/2, frameW, frameH);
+            } else {
+                const srcCol = frame.id % cols;
+                const srcRow = Math.floor(frame.id / cols);
+                ctx.drawImage(
+                    img, 
+                    srcCol * frameW, srcRow * frameH, frameW, frameH, 
+                    -frameW/2, -frameH/2, frameW, frameH
+                );
+            }
             ctx.restore();
 
             // Scan pixels
             const imageData = ctx.getImageData(0, 0, frameW, frameH);
             const data = imageData.data;
 
-            for (let y = 0; y < frameH; y+=2) { // Optimization: skip every other pixel for speed
+            for (let y = 0; y < frameH; y+=2) { 
                 for (let x = 0; x < frameW; x+=2) {
                     const i = (y * frameW + x) * 4;
-                    // Check if NOT background
                     if (!isBackground(data[i], data[i+1], data[i+2])) {
                          if (x < minX) minX = x;
                          if (x > maxX) maxX = x;
@@ -159,7 +240,7 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
             minX = 0; minY = 0; maxX = frameW; maxY = frameH;
         }
 
-        // Add a little padding
+        // Add padding
         const padding = 4;
         minX = Math.max(0, minX - padding);
         minY = Math.max(0, minY - padding);
@@ -180,35 +261,37 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
             return;
         }
 
-        // Fill background color on new canvas to maintain consistency
         finalCtx.fillStyle = `rgb(${bgPixel[0]}, ${bgPixel[1]}, ${bgPixel[2]})`;
         finalCtx.fillRect(0, 0, finalCanvas.width, finalCanvas.height);
 
-        // Redraw all frames into the new tight grid
         frames.forEach((frame, outputIndex) => {
              if (frame.isDeleted) return;
 
-             // Draw original frame to temp
+             // Draw frame to temp
              ctx.clearRect(0, 0, frameW, frameH);
              ctx.fillStyle = `rgb(${bgPixel[0]}, ${bgPixel[1]}, ${bgPixel[2]})`;
              ctx.fillRect(0, 0, frameW, frameH);
 
-             const srcCol = frame.id % cols;
-             const srcRow = Math.floor(frame.id / cols);
-             
              ctx.save();
              ctx.translate(frameW/2, frameH/2);
              ctx.rotate((frame.rotation * Math.PI) / 180);
              ctx.scale(frame.flipH ? -1 : 1, 1);
              ctx.scale(frame.scale, frame.scale);
-             ctx.drawImage(
-                 img, 
-                 srcCol * frameW, srcRow * frameH, frameW, frameH, 
-                 -frameW/2, -frameH/2, frameW, frameH
-             );
+
+             if (overrideImages.has(frame.id)) {
+                const oImg = overrideImages.get(frame.id)!;
+                ctx.drawImage(oImg, -frameW/2, -frameH/2, frameW, frameH);
+             } else {
+                const srcCol = frame.id % cols;
+                const srcRow = Math.floor(frame.id / cols);
+                ctx.drawImage(
+                    img, 
+                    srcCol * frameW, srcRow * frameH, frameW, frameH, 
+                    -frameW/2, -frameH/2, frameW, frameH
+                );
+             }
              ctx.restore();
 
-             // Copy CROP region
              const destCol = outputIndex % cols;
              const destRow = Math.floor(outputIndex / cols);
 
@@ -220,13 +303,19 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
         });
 
         const resultData = finalCanvas.toDataURL('image/png');
+        
+        // CRITICAL: When we smart crop, we are essentially creating a new source image.
+        // The "overrides" are now baked into this new image.
+        // So we should clear the overrides from the state, otherwise they will double-apply
+        // or mismatch dimensions on next render.
+        setFrames(prev => prev.map(f => ({ ...f, overrideImage: undefined, rotation: 0, flipH: false, scale: 1 })));
         setCurrentImageSrc(resultData); 
         setIsProcessing(false);
     }, 100);
   };
 
   // --- Final Save ---
-  const handleSave = () => {
+  const handleSave = async () => {
     if (!sourceImageRef.current) return;
     
     const img = sourceImageRef.current;
@@ -239,13 +328,18 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
+    // Pre-load override images
+    const overrideImages = new Map<number, HTMLImageElement>();
+    for (const f of frames) {
+        if (f.overrideImage && !f.isDeleted) {
+            const i = new Image();
+            await new Promise((r) => { i.onload = r; i.src = f.overrideImage!; });
+            overrideImages.set(f.id, i);
+        }
+    }
+
     frames.forEach((frame, outputIndex) => {
       if (frame.isDeleted) return;
-
-      const srcCol = frame.id % cols;
-      const srcRow = Math.floor(frame.id / cols);
-      const srcX = srcCol * frameW;
-      const srcY = srcRow * frameH;
 
       const destCol = outputIndex % cols;
       const destRow = Math.floor(outputIndex / cols);
@@ -259,11 +353,21 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
       ctx.scale(frame.flipH ? -1 : 1, 1);
       ctx.scale(frame.scale, frame.scale);
 
-      ctx.drawImage(
-        img,
-        srcX, srcY, frameW, frameH,
-        -frameW / 2, -frameH / 2, frameW, frameH
-      );
+      if (overrideImages.has(frame.id)) {
+         const oImg = overrideImages.get(frame.id)!;
+         // Draw override centered
+         ctx.drawImage(oImg, -frameW/2, -frameH/2, frameW, frameH);
+      } else {
+         const srcCol = frame.id % cols;
+         const srcRow = Math.floor(frame.id / cols);
+         const srcX = srcCol * frameW;
+         const srcY = srcRow * frameH;
+         ctx.drawImage(
+            img,
+            srcX, srcY, frameW, frameH,
+            -frameW / 2, -frameH / 2, frameW, frameH
+         );
+      }
 
       ctx.restore();
     });
@@ -285,7 +389,7 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
               <Undo2 size={20} className="text-indigo-400" />
               Refine Sprite Sheet
             </h3>
-            <p className="text-xs text-slate-400">Drag to Reorder • Crop to Subject • Delete Invalid</p>
+            <p className="text-xs text-slate-400">Drag to Reorder • AI Redraw • Crop to Subject</p>
           </div>
           <div className="flex gap-2">
              <button 
@@ -295,7 +399,7 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
                title="Auto-detect subjects and remove extra whitespace"
              >
               {isProcessing ? <Loader2 size={16} className="animate-spin" /> : <Scissors size={16} />}
-              Smart Crop
+              Smart Crop & Bake
             </button>
             <div className="w-px h-8 bg-slate-700 mx-2"></div>
             <button onClick={onClose} className="px-4 py-2 text-slate-300 hover:text-white text-sm">Cancel</button>
@@ -351,7 +455,7 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
                <>
                  <div className="text-center">
                     <h4 className="text-slate-400 text-sm font-medium uppercase tracking-wider mb-4">Selected Frame</h4>
-                    <div className="w-40 h-40 mx-auto bg-slate-700/50 border border-slate-600 rounded-lg checkerboard flex items-center justify-center overflow-hidden relative shadow-inner">
+                    <div className="w-40 h-40 mx-auto bg-slate-700/50 border border-slate-600 rounded-lg checkerboard flex items-center justify-center overflow-hidden relative shadow-inner group">
                         {sourceImageRef.current && (
                             <FrameCanvasPreview 
                             frame={selectedFrame} 
@@ -363,13 +467,58 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
                         {selectedFrame.isDeleted && (
                             <div className="absolute inset-0 flex items-center justify-center bg-red-900/60 text-red-200 font-bold backdrop-blur-sm">DELETED</div>
                         )}
+                        {selectedFrame.overrideImage && (
+                             <div className="absolute bottom-2 right-2 bg-purple-600 text-white text-[9px] px-1.5 py-0.5 rounded shadow">AI EDITED</div>
+                        )}
                     </div>
                     <div className="mt-3 text-xs text-slate-500 font-mono">
                         Original ID: {selectedFrame.id + 1}
                     </div>
                  </div>
 
+                 {/* AI Redraw Section */}
+                 <div className="bg-slate-900/50 p-3 rounded-lg border border-purple-500/20 mt-2">
+                    <label className="text-xs font-bold text-purple-400 flex items-center gap-1.5 mb-2">
+                        <Sparkles size={12} /> AI REDRAW / INPAINT
+                    </label>
+                    
+                    <div className="flex gap-2 mb-2">
+                        <input 
+                            type="text" 
+                            value={redrawPrompt}
+                            onChange={(e) => setRedrawPrompt(e.target.value)}
+                            placeholder="e.g. change sword to axe"
+                            className="flex-grow bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-xs text-white focus:border-purple-500 outline-none"
+                        />
+                    </div>
+                    
+                    <button 
+                        onClick={generateVariations}
+                        disabled={isGeneratingVar || !redrawPrompt.trim()}
+                        className="w-full py-1.5 bg-gradient-to-r from-indigo-600 to-purple-600 text-white text-xs font-bold rounded hover:from-indigo-500 hover:to-purple-500 disabled:opacity-50 flex items-center justify-center gap-2"
+                    >
+                        {isGeneratingVar ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+                        Generate 3 Variations
+                    </button>
+
+                    {/* Variations Grid */}
+                    {variations.length > 0 && (
+                        <div className="mt-3 grid grid-cols-3 gap-2">
+                            {variations.map((v, i) => (
+                                <img 
+                                    key={i} 
+                                    src={v} 
+                                    onClick={() => handleUpdateFrame({ overrideImage: v })}
+                                    className="w-full h-16 object-contain bg-slate-800 rounded border border-slate-700 hover:border-purple-400 cursor-pointer hover:scale-105 transition-all"
+                                    title="Click to apply this variation"
+                                />
+                            ))}
+                        </div>
+                    )}
+                 </div>
+
                  <div className="space-y-6 border-t border-slate-700/50 pt-6">
+                    {/* Transforms */}
                     <div className="space-y-3">
                         <label className="text-xs font-semibold text-slate-400 flex items-center gap-2">
                             <ArrowRightLeft size={12} /> TRANSFORM
@@ -393,30 +542,7 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
                             </button>
                         </div>
                     </div>
-
-                    <div className="space-y-3">
-                        <label className="text-xs font-semibold text-slate-400 flex items-center gap-2">
-                            <Maximize2 size={12} /> SCALE
-                        </label>
-                        <div className="bg-slate-700/50 p-1 rounded-lg flex items-center justify-between">
-                            <button 
-                                onClick={() => handleUpdateFrame({ scale: Math.max(0.5, selectedFrame.scale - 0.1) })}
-                                className="p-2 hover:bg-slate-600 rounded text-white transition-colors"
-                            >
-                                <Minimize2 size={16} />
-                            </button>
-                            <span className="text-sm font-mono text-white font-bold">
-                                {Math.round(selectedFrame.scale * 100)}%
-                            </span>
-                            <button 
-                                onClick={() => handleUpdateFrame({ scale: Math.min(2.0, selectedFrame.scale + 0.1) })}
-                                className="p-2 hover:bg-slate-600 rounded text-white transition-colors"
-                            >
-                                <Maximize2 size={16} />
-                            </button>
-                        </div>
-                    </div>
-
+                    
                     <div className="pt-4 border-t border-slate-700/50">
                         <button 
                         onClick={() => handleUpdateFrame({ isDeleted: !selectedFrame.isDeleted })}
@@ -465,6 +591,17 @@ const FrameThumbnail: React.FC<{
   onDrop: (e: React.DragEvent, index: number) => void;
 }> = ({ frame, arrayIndex, sourceImage, rows, cols, isSelected, isDragging, onClick, onDragStart, onDragOver, onDrop }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [overrideImg, setOverrideImg] = useState<HTMLImageElement | null>(null);
+
+  useEffect(() => {
+      if (frame.overrideImage) {
+          const i = new Image();
+          i.src = frame.overrideImage;
+          i.onload = () => setOverrideImg(i);
+      } else {
+          setOverrideImg(null);
+      }
+  }, [frame.overrideImage]);
 
   useEffect(() => {
     if (!sourceImage || !canvasRef.current) return;
@@ -482,23 +619,26 @@ const FrameThumbnail: React.FC<{
       return;
     }
 
-    const srcX = (frame.id % cols) * frameW;
-    const srcY = Math.floor(frame.id / cols) * frameH;
-
     ctx.save();
     ctx.translate(frameW/2, frameH/2);
     ctx.rotate((frame.rotation * Math.PI) / 180);
     ctx.scale(frame.flipH ? -1 : 1, 1);
     ctx.scale(frame.scale, frame.scale);
     
-    ctx.drawImage(
-      sourceImage,
-      srcX, srcY, frameW, frameH,
-      -frameW/2, -frameH/2, frameW, frameH
-    );
+    if (overrideImg) {
+        ctx.drawImage(overrideImg, -frameW/2, -frameH/2, frameW, frameH);
+    } else {
+        const srcX = (frame.id % cols) * frameW;
+        const srcY = Math.floor(frame.id / cols) * frameH;
+        ctx.drawImage(
+            sourceImage,
+            srcX, srcY, frameW, frameH,
+            -frameW/2, -frameH/2, frameW, frameH
+        );
+    }
     ctx.restore();
 
-  }, [sourceImage, frame, rows, cols]);
+  }, [sourceImage, frame, rows, cols, overrideImg]);
 
   return (
     <div 
@@ -523,6 +663,11 @@ const FrameThumbnail: React.FC<{
           <X className="text-red-200 drop-shadow-md" size={24} />
         </div>
       )}
+      {frame.overrideImage && (
+         <div className="absolute bottom-1 right-1">
+            <Sparkles size={10} className="text-purple-400 drop-shadow-md" />
+         </div>
+      )}
       {isSelected && (
           <div className="absolute inset-0 border-2 border-indigo-500 rounded-lg pointer-events-none"></div>
       )}
@@ -537,6 +682,17 @@ const FrameCanvasPreview: React.FC<{
   cols: number;
 }> = ({ frame, sourceImage, rows, cols }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
+    const [overrideImg, setOverrideImg] = useState<HTMLImageElement | null>(null);
+  
+    useEffect(() => {
+        if (frame.overrideImage) {
+            const i = new Image();
+            i.src = frame.overrideImage;
+            i.onload = () => setOverrideImg(i);
+        } else {
+            setOverrideImg(null);
+        }
+    }, [frame.overrideImage]);
 
     useEffect(() => {
       if (!canvasRef.current) return;
@@ -551,20 +707,26 @@ const FrameCanvasPreview: React.FC<{
         ctx.clearRect(0, 0, frameW, frameH);
         return;
       }
-      const srcX = (frame.id % cols) * frameW;
-      const srcY = Math.floor(frame.id / cols) * frameH;
+
       ctx.save();
       ctx.translate(frameW/2, frameH/2);
       ctx.rotate((frame.rotation * Math.PI) / 180);
       ctx.scale(frame.flipH ? -1 : 1, 1);
       ctx.scale(frame.scale, frame.scale);
-      ctx.drawImage(
-        sourceImage,
-        srcX, srcY, frameW, frameH,
-        -frameW/2, -frameH/2, frameW, frameH
-      );
+
+      if (overrideImg) {
+        ctx.drawImage(overrideImg, -frameW/2, -frameH/2, frameW, frameH);
+      } else {
+        const srcX = (frame.id % cols) * frameW;
+        const srcY = Math.floor(frame.id / cols) * frameH;
+        ctx.drawImage(
+            sourceImage,
+            srcX, srcY, frameW, frameH,
+            -frameW/2, -frameH/2, frameW, frameH
+        );
+      }
       ctx.restore();
-    }, [frame, sourceImage, rows, cols]);
+    }, [frame, sourceImage, rows, cols, overrideImg]);
 
     return <canvas ref={canvasRef} className="w-full h-full object-contain" />;
 }

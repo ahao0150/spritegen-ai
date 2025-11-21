@@ -70,3 +70,45 @@ export const generateSpriteSheet = async (
     throw new Error(error.message || "Failed to generate sprite sheet");
   }
 };
+
+export const regenerateSingleFrame = async (
+  frameBase64: string,
+  prompt: string
+): Promise<string> => {
+  try {
+    const base64Data = frameBase64.replace(/^data:image\/\w+;base64,/, "");
+    const mimeType = frameBase64.match(/[^:]\w+\/[\w-+\d.]+(?=;|,)/)?.[0] || "image/png";
+
+    // Specialized prompt for single frame editing
+    const refinePrompt = `
+      Redraw this specific single game sprite frame.
+      Task: ${prompt}.
+      
+      Requirements:
+      1. Keep the exact same art style, proportions, and camera angle as the reference.
+      2. Background MUST be solid WHITE (#FFFFFF).
+      3. Do not crop too tightly, leave a small margin.
+      4. Output only the single character sprite, not a sheet.
+    `;
+
+    const response = await ai.models.generateContent({
+      model: ModelType.GEMINI_FLASH_IMAGE,
+      contents: {
+        parts: [
+          { inlineData: { data: base64Data, mimeType } },
+          { text: refinePrompt },
+        ],
+      },
+      config: { responseModalities: [Modality.IMAGE] },
+    });
+
+    const imagePart = response.candidates?.[0]?.content?.parts?.find((part) => part.inlineData);
+    if (!imagePart?.inlineData) throw new Error("No image data found.");
+
+    return `data:${imagePart.inlineData.mimeType};base64,${imagePart.inlineData.data}`;
+
+  } catch (error: any) {
+    console.error("Gemini Frame Gen Error:", error);
+    throw new Error("Failed to regenerate frame");
+  }
+};
