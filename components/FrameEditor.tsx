@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { RotateCw, Minimize2, Maximize2, FlipHorizontal, Trash2, Check, X, Undo2, GripVertical, ArrowRightLeft, Scissors, Loader2, Sparkles, RefreshCw } from 'lucide-react';
+import { RotateCw, Minimize2, Maximize2, FlipHorizontal, Trash2, Check, X, Undo2, GripVertical, ArrowRightLeft, Scissors, Loader2, Sparkles, RefreshCw, PaintBucket, MousePointer2 } from 'lucide-react';
 import { regenerateSingleFrame } from '../services/geminiService';
+import { BackgroundOption } from '../types';
 
 interface FrameData {
   id: number;
@@ -31,6 +32,7 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
   const [redrawPrompt, setRedrawPrompt] = useState('');
   const [isGeneratingVar, setIsGeneratingVar] = useState(false);
   const [variations, setVariations] = useState<string[]>([]);
+  const [redrawBg, setRedrawBg] = useState<BackgroundOption>('white');
 
   // Initialize
   useEffect(() => {
@@ -107,7 +109,8 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
             const base64Ref = tempCanvas.toDataURL('image/png');
 
             // 2. Generate 3 variations in parallel
-            const promises = [1, 2, 3].map(() => regenerateSingleFrame(base64Ref, redrawPrompt));
+            // Pass the background constraint
+            const promises = [1, 2, 3].map(() => regenerateSingleFrame(base64Ref, redrawPrompt, redrawBg));
             const results = await Promise.all(promises);
             
             setVariations(results);
@@ -145,11 +148,12 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
     setDraggedIndex(null);
   };
 
-  // --- Smart Crop Logic ---
+  // --- Advanced Smart Crop & Center Logic ---
   const handleSmartCrop = () => {
     if (!sourceImageRef.current) return;
     setIsProcessing(true);
 
+    // Use timeout to allow UI to show loading state
     setTimeout(async () => {
         const img = sourceImageRef.current!;
         const frameW = img.width / cols;
@@ -175,103 +179,12 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
             }
         }
 
-        // 1. Analyze all frames to find the global bounding box
-        let minX = frameW, minY = frameH, maxX = 0, maxY = 0;
-        let hasContent = false;
-
-        // Draw first frame to check background color
-        ctx.drawImage(img, 0, 0, frameW, frameH, 0, 0, frameW, frameH);
-        const bgPixel = ctx.getImageData(0, 0, 1, 1).data;
-        
-        const isBackground = (r: number, g: number, b: number) => {
-            const threshold = 40; 
-            return Math.abs(r - bgPixel[0]) < threshold &&
-                   Math.abs(g - bgPixel[1]) < threshold &&
-                   Math.abs(b - bgPixel[2]) < threshold;
-        };
-
-        // Analyze every frame
-        frames.forEach(frame => {
-            if (frame.isDeleted) return;
-
-            // Clear temp canvas
-            ctx.clearRect(0, 0, frameW, frameH);
-            
-            // Draw logic
-            ctx.save();
-            ctx.translate(frameW/2, frameH/2);
-            ctx.rotate((frame.rotation * Math.PI) / 180);
-            ctx.scale(frame.flipH ? -1 : 1, 1);
-            ctx.scale(frame.scale, frame.scale);
-
-            if (overrideImages.has(frame.id)) {
-                const oImg = overrideImages.get(frame.id)!;
-                ctx.drawImage(oImg, -frameW/2, -frameH/2, frameW, frameH);
-            } else {
-                const srcCol = frame.id % cols;
-                const srcRow = Math.floor(frame.id / cols);
-                ctx.drawImage(
-                    img, 
-                    srcCol * frameW, srcRow * frameH, frameW, frameH, 
-                    -frameW/2, -frameH/2, frameW, frameH
-                );
-            }
-            ctx.restore();
-
-            // Scan pixels
-            const imageData = ctx.getImageData(0, 0, frameW, frameH);
-            const data = imageData.data;
-
-            for (let y = 0; y < frameH; y+=2) { 
-                for (let x = 0; x < frameW; x+=2) {
-                    const i = (y * frameW + x) * 4;
-                    if (!isBackground(data[i], data[i+1], data[i+2])) {
-                         if (x < minX) minX = x;
-                         if (x > maxX) maxX = x;
-                         if (y < minY) minY = y;
-                         if (y > maxY) maxY = y;
-                         hasContent = true;
-                    }
-                }
-            }
-        });
-
-        if (!hasContent) {
-            minX = 0; minY = 0; maxX = frameW; maxY = frameH;
-        }
-
-        // Add padding
-        const padding = 4;
-        minX = Math.max(0, minX - padding);
-        minY = Math.max(0, minY - padding);
-        maxX = Math.min(frameW, maxX + padding);
-        maxY = Math.min(frameH, maxY + padding);
-
-        const newFrameW = maxX - minX;
-        const newFrameH = maxY - minY;
-
-        // 2. Generate new Sprite Sheet
-        const finalCanvas = document.createElement('canvas');
-        finalCanvas.width = newFrameW * cols;
-        finalCanvas.height = newFrameH * rows;
-        const finalCtx = finalCanvas.getContext('2d');
-
-        if (!finalCtx) {
-            setIsProcessing(false);
-            return;
-        }
-
-        finalCtx.fillStyle = `rgb(${bgPixel[0]}, ${bgPixel[1]}, ${bgPixel[2]})`;
-        finalCtx.fillRect(0, 0, finalCanvas.width, finalCanvas.height);
-
-        frames.forEach((frame, outputIndex) => {
-             if (frame.isDeleted) return;
-
-             // Draw frame to temp
+        // Helper to get pixel data of a rendered frame and ensure it is drawn on tempCanvas
+        const renderFrameToTemp = (frame: FrameData) => {
+             // Clear
              ctx.clearRect(0, 0, frameW, frameH);
-             ctx.fillStyle = `rgb(${bgPixel[0]}, ${bgPixel[1]}, ${bgPixel[2]})`;
-             ctx.fillRect(0, 0, frameW, frameH);
-
+             
+             // Draw logic (transforms, overrides, or source)
              ctx.save();
              ctx.translate(frameW/2, frameH/2);
              ctx.rotate((frame.rotation * Math.PI) / 180);
@@ -291,23 +204,126 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
                 );
              }
              ctx.restore();
+             
+             return ctx.getImageData(0, 0, frameW, frameH);
+        };
 
-             const destCol = outputIndex % cols;
-             const destRow = Math.floor(outputIndex / cols);
+        // 1. Determine Background Color (sample corners of first visible frame)
+        // We render the first non-deleted frame to temp canvas to sample it
+        const firstVisibleFrame = frames.find(f => !f.isDeleted) || frames[0];
+        const firstFrameData = renderFrameToTemp(firstVisibleFrame).data;
+        
+        // Sample Top-Left pixel
+        const bgPixel = [firstFrameData[0], firstFrameData[1], firstFrameData[2]];
+        
+        const isBackground = (r: number, g: number, b: number) => {
+            const threshold = 40; // Tolerance
+            return Math.abs(r - bgPixel[0]) < threshold &&
+                   Math.abs(g - bgPixel[1]) < threshold &&
+                   Math.abs(b - bgPixel[2]) < threshold;
+        };
 
-             finalCtx.drawImage(
-                 tempCanvas,
-                 minX, minY, newFrameW, newFrameH,
-                 destCol * newFrameW, destRow * newFrameH, newFrameW, newFrameH
-             );
+        // 2. Analyze EACH frame to find its unique content bounds (Per-Frame Segmentation)
+        interface Rect { x: number, y: number, w: number, h: number, hasContent: boolean }
+        const frameBounds: Rect[] = [];
+        let maxContentW = 0;
+        let maxContentH = 0;
+
+        for (const frame of frames) {
+            if (frame.isDeleted) {
+                frameBounds.push({ x:0, y:0, w:0, h:0, hasContent: false });
+                continue;
+            }
+            
+            const imageData = renderFrameToTemp(frame); // This draws to ctx
+            const data = imageData.data;
+            
+            // Find bounds for THIS frame
+            let minX = frameW, minY = frameH, maxX = 0, maxY = 0;
+            let hasContent = false;
+            
+            for (let y = 0; y < frameH; y++) {
+                for (let x = 0; x < frameW; x++) {
+                    const i = (y * frameW + x) * 4;
+                    if (!isBackground(data[i], data[i+1], data[i+2])) {
+                         if (x < minX) minX = x;
+                         if (x > maxX) maxX = x;
+                         if (y < minY) minY = y;
+                         if (y > maxY) maxY = y;
+                         hasContent = true;
+                    }
+                }
+            }
+
+            if (hasContent) {
+                const w = maxX - minX + 1;
+                const h = maxY - minY + 1;
+                if (w > maxContentW) maxContentW = w;
+                if (h > maxContentH) maxContentH = h;
+                frameBounds.push({ x: minX, y: minY, w, h, hasContent: true });
+            } else {
+                frameBounds.push({ x: 0, y: 0, w: 0, h: 0, hasContent: false });
+            }
+        }
+        
+        // If no content found at all
+        if (maxContentW === 0) {
+             maxContentW = frameW;
+             maxContentH = frameH;
+        }
+
+        // Add safe padding
+        const padding = 4;
+        maxContentW = Math.min(frameW, maxContentW + padding * 2);
+        maxContentH = Math.min(frameH, maxContentH + padding * 2);
+        
+        // 3. Create New Optimized Canvas
+        const finalCanvas = document.createElement('canvas');
+        finalCanvas.width = maxContentW * cols;
+        finalCanvas.height = maxContentH * rows;
+        const finalCtx = finalCanvas.getContext('2d');
+        
+        if(!finalCtx) {
+             setIsProcessing(false);
+             return;
+        }
+        
+        // Fill Background
+        finalCtx.fillStyle = `rgb(${bgPixel[0]}, ${bgPixel[1]}, ${bgPixel[2]})`;
+        finalCtx.fillRect(0, 0, finalCanvas.width, finalCanvas.height);
+        
+        // 4. Draw frames CENTERED in new slots
+        frames.forEach((frame, i) => {
+            if (frame.isDeleted || !frameBounds[i].hasContent) return;
+            
+            const bounds = frameBounds[i];
+            
+            // Re-render frame to temp canvas to get the source pixels
+            renderFrameToTemp(frame); 
+            
+            // Destination in new canvas
+            const destCol = i % cols;
+            const destRow = Math.floor(i / cols);
+            
+            // Calculate position to center the content
+            const cellX = destCol * maxContentW;
+            const cellY = destRow * maxContentH;
+            
+            // Center logic:
+            const destX = cellX + (maxContentW - bounds.w) / 2;
+            const destY = cellY + (maxContentH - bounds.h) / 2;
+            
+            finalCtx.drawImage(
+                tempCanvas,
+                bounds.x, bounds.y, bounds.w, bounds.h, // Source crop (The identified subject)
+                destX, destY, bounds.w, bounds.h        // Dest location (Centered)
+            );
         });
-
+        
+        // 5. Update State
         const resultData = finalCanvas.toDataURL('image/png');
         
-        // CRITICAL: When we smart crop, we are essentially creating a new source image.
-        // The "overrides" are now baked into this new image.
-        // So we should clear the overrides from the state, otherwise they will double-apply
-        // or mismatch dimensions on next render.
+        // Important: Reset transforms since we baked them in
         setFrames(prev => prev.map(f => ({ ...f, overrideImage: undefined, rotation: 0, flipH: false, scale: 1 })));
         setCurrentImageSrc(resultData); 
         setIsProcessing(false);
@@ -389,17 +405,17 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
               <Undo2 size={20} className="text-indigo-400" />
               Refine Sprite Sheet
             </h3>
-            <p className="text-xs text-slate-400">Drag to Reorder • AI Redraw • Crop to Subject</p>
+            <p className="text-xs text-slate-400">Drag to Reorder • AI Redraw • Smart Crop</p>
           </div>
           <div className="flex gap-2">
              <button 
                onClick={handleSmartCrop} 
                disabled={isProcessing}
                className="px-4 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white rounded-lg text-sm font-medium flex items-center gap-2 border border-purple-400/30"
-               title="Auto-detect subjects and remove extra whitespace"
+               title="Isolate subjects and center them in a tighter grid"
              >
               {isProcessing ? <Loader2 size={16} className="animate-spin" /> : <Scissors size={16} />}
-              Smart Crop & Bake
+              Trim & Center All
             </button>
             <div className="w-px h-8 bg-slate-700 mx-2"></div>
             <button onClick={onClose} className="px-4 py-2 text-slate-300 hover:text-white text-sm">Cancel</button>
@@ -415,8 +431,8 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
           {isProcessing && (
               <div className="absolute inset-0 z-50 bg-slate-900/80 backdrop-blur flex flex-col items-center justify-center text-white">
                   <Loader2 size={48} className="animate-spin text-purple-500 mb-4" />
-                  <h3 className="text-xl font-bold">Analyzing Frames...</h3>
-                  <p className="text-slate-400">Optimizing frame sizes based on character bounds</p>
+                  <h3 className="text-xl font-bold">Segmenting & Centering...</h3>
+                  <p className="text-slate-400">Isolating characters and removing empty space</p>
               </div>
           )}
 
@@ -490,6 +506,29 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
                             placeholder="e.g. change sword to axe"
                             className="flex-grow bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-xs text-white focus:border-purple-500 outline-none"
                         />
+                    </div>
+
+                    <div className="flex gap-3 mb-3 text-[10px] text-slate-400">
+                        <label className="flex items-center gap-1.5 cursor-pointer">
+                            <input 
+                                type="radio" 
+                                name="redrawBg" 
+                                checked={redrawBg === 'white'}
+                                onChange={() => setRedrawBg('white')}
+                                className="bg-slate-800 border-slate-600 text-purple-500 focus:ring-purple-500"
+                            />
+                            <span>White BG</span>
+                        </label>
+                        <label className="flex items-center gap-1.5 cursor-pointer">
+                            <input 
+                                type="radio" 
+                                name="redrawBg" 
+                                checked={redrawBg === 'green'}
+                                onChange={() => setRedrawBg('green')}
+                                className="bg-slate-800 border-slate-600 text-green-500 focus:ring-green-500"
+                            />
+                            <span className="text-green-400">Green BG</span>
+                        </label>
                     </div>
                     
                     <button 
@@ -566,7 +605,7 @@ export const FrameEditor: React.FC<FrameEditorProps> = ({ imageUrl, rows, cols, 
                </>
              ) : (
                  <div className="h-full flex flex-col items-center justify-center text-slate-500 opacity-50">
-                     <Undo2 size={48} />
+                     <MousePointer2 size={48} />
                      <p className="mt-4 text-sm">Select a frame to edit</p>
                  </div>
              )}

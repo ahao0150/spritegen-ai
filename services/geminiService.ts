@@ -73,11 +73,16 @@ export const generateSpriteSheet = async (
 
 export const regenerateSingleFrame = async (
   frameBase64: string,
-  prompt: string
+  prompt: string,
+  background: BackgroundOption = 'white'
 ): Promise<string> => {
   try {
     const base64Data = frameBase64.replace(/^data:image\/\w+;base64,/, "");
     const mimeType = frameBase64.match(/[^:]\w+\/[\w-+\d.]+(?=;|,)/)?.[0] || "image/png";
+
+    const bgColorDescription = background === 'green' 
+      ? 'solid bright green hex code #00FF00' 
+      : 'solid white hex code #FFFFFF';
 
     // Specialized prompt for single frame editing
     const refinePrompt = `
@@ -86,7 +91,7 @@ export const regenerateSingleFrame = async (
       
       Requirements:
       1. Keep the exact same art style, proportions, and camera angle as the reference.
-      2. Background MUST be solid WHITE (#FFFFFF).
+      2. BACKGROUND MUST BE ${bgColorDescription}. 
       3. Do not crop too tightly, leave a small margin.
       4. Output only the single character sprite, not a sheet.
     `;
